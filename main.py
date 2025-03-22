@@ -19,7 +19,7 @@ from livekit.agents.pipeline import VoicePipelineAgent
 from livekit.plugins import deepgram, openai, silero, google
 from livekit.plugins.rime import TTS
 from google import genai
-from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
+from google.genai import types
 
 from typing import Annotated, Union
 from exa_py import Exa
@@ -85,7 +85,11 @@ async def entrypoint(ctx: JobContext):
         Callback that runs right before the LLM generates a response.
         Captures the current video frame and adds it to the conversation context.
         """
+        logger.info("before_llm_cb")
         latest_image = await get_latest_image(ctx.room)
+
+        latest_user_message = [m for m in chat_ctx.messages if m.role == "user"][-1]
+        logger.info(f"latest user message: {latest_user_message.content}")
         if latest_image:
             image_content = [llm.ChatImage(image=latest_image)]
             chat_ctx.messages.append(
@@ -93,34 +97,114 @@ async def entrypoint(ctx: JobContext):
             )
             logger.debug("Added latest frame to conversation context")
 
-        latest_user_message = [m for m in chat_ctx.messages if m.role == "user"][-1]
-
         # 1. Association Agent - Generate joke suggestions based on user query and image
         association_prompt = f"""
-        Based on the user's message and the image provided, generate a list of 20 joke suggestions.
-        Be creative and diverse in your suggestions. Each joke should be brief and humorous.
-        Format your response as a numbered list.
-        
-        User message: {latest_user_message.content if hasattr(latest_user_message.content, '__str__') else 'No text content'}
-        """
+		Based on the user's message and the image provided, generate a list of 20 joke suggestions.
+		Be creative and diverse in your suggestions. Each joke should be brief and humorous.
+		Format your response as a numbered list.
+		```
+		User message: {latest_user_message.content if hasattr(latest_user_message.content, '__str__') else 'No text content'}
+		```
+		"""
+        logger.info(f"association_prompt: {association_prompt}")
 
         association_response = gemini_client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=association_prompt,
+            contents=[
+                association_prompt,
+            ],
         )
 
         joke_suggestions = association_response.text
-        logger.debug(f"Generated joke suggestions: {joke_suggestions}")
+        logger.info(f"Generated joke suggestions: {joke_suggestions}")
 
         # 2. Humor Judge - Select the funniest joke from the suggestions
         humor_judge_prompt = f"""
-        You are a humor judge. Below is a list of joke suggestions.
-        Select the single funniest joke from the list and explain briefly why it's the funniest.
-        Return only the selected joke without numbering or explanation.
-        
-        Joke suggestions:
-        {joke_suggestions}
-        """
+		You are a humor judge. Below is a list of joke suggestions.
+		Select the single funniest joke from the list and explain briefly why it's the funniest.
+		Use the following framework to judge:
+        The best jokes are following one of these styles:
+		- Sarcasm
+		- Absurd
+		- Dry
+		- Exaggeration
+		- Popular reference
+		- Dark
+		- Wordplay
+
+        Use the examples of good jokes below to help you judge the jokes.
+		EXAMPLES:
+		EXAMPLE1:
+		INPUT:
+		```
+		Screenshot with a bunch of factors for energy consumption of different programming languages and the headline "Python consumes 76 times more energy and is 72 times slower than C."
+		```
+		JOKE STYLE: self-deprecation
+		JOKE:
+		```
+		yes but what about my energy and desire to live when i code in C
+		```
+		OR 
+		JOKE STYLE: exaggeration
+		JOKE:
+		```
+		and when you do it in assembly you actually create a perpetuum mobile and generate energy out of nothing
+		```
+
+		EXAMPLE2:
+		INPUT:
+		```
+		Screenshot of a tweet that says "Simone Biles is better at gymnastics than I am at sitting at home drinking watching TV. And I'm pretty good at that"
+		```
+		JOKE STYLE: sarcasm
+		JOKE:
+		```
+		She's 27 she's probably better at drinking than you are mate.. and at social media since we're at it  
+		```
+
+
+		EXAMPLE4:
+		INPUT:
+		```
+		wendys
+		4h4 hours ago
+		My plan for today was to get wendys breakfast and thats pretty much it
+		```
+		JOKE STYLE: Dark
+		JOKE:
+		```
+		Said Melanie Vicks, 32, who died tragically later that day from stomach bleeding
+		```
+
+		EXAMPLE5:
+		INPUT:
+		```
+		rombesk
+		2h2 hours ago
+		What company could go bankrupt tomorrow and it would be good for the world?
+		```
+		JOKE STYLE: Dark
+		JOKE:
+		```
+		Make a wish foundation
+		```
+
+		EXAMPLE6:
+		INPUT:
+		```
+		ginnyhogan_
+		3h3 hours ago
+		Id like to marry rich, but honestly, I'd also settle for marrying poor.
+		```
+		JOKE STYLE: self-depration
+		JOKE:
+		```
+		I am so lonely, i'm at the stage where i'd settle for getting a physical touch by a homeless person
+		```
+		
+		Joke suggestions:
+		{joke_suggestions}
+		"""
 
         humor_judge_response = gemini_client.models.generate_content(
             model="gemini-2.0-flash",
@@ -128,7 +212,7 @@ async def entrypoint(ctx: JobContext):
         )
 
         selected_joke = humor_judge_response.text.strip()
-        logger.debug(f"Selected joke: {selected_joke}")
+        logger.info(f"Selected joke: {selected_joke}")
 
         # Add the selected joke as a system message to guide the main LLM response
         chat_ctx.messages.append(
@@ -142,9 +226,10 @@ async def entrypoint(ctx: JobContext):
     initial_chat_ctx.messages.append(
         llm.ChatMessage(
             content="""
-    You are a conversational assistant.
-    You are given the latest user message along with a suggestion for a joke.
-    Your task is to use this joke and convert it into a text for a text-to-speech model.
+	You are a conversational assistant.
+	You are given the latest user message along with a suggestion for a joke.
+    You also have the image from the user's camera.
+	Your task is to use this joke suggestion and the image when appropriate and convert it into a joke text for a text-to-speech model.
 
 	<TTS_SETTINGS>
 	The text-to-speech model you are using supports custom pauses, custom pronounciation, and spelling.
@@ -152,63 +237,83 @@ async def entrypoint(ctx: JobContext):
 
 	<n> for a pause of n milliseconds
 
-	Custom pronounciation - here's a list of words and their custom pronounciation:
-1. **Pizza**: {p1i0zx} (sounds like "peeza")
-2. **Banana**: {bx0n1a0nx} (emphasis on the second syllable)
-3. **Robot**: {r1o0b0At} (with "but" ending)
-4. **Computer**: {kxm0p1u0tx} (compressed pronunciation)
-5. **Potato**: {px0t1e0to} (with long A sound)
-6. **Sandwich**: {s1@0nW0wiC} (with unusual vowel shifts)
-7. **Balloon**: {bx0l1u0n} (exaggerated "oo" sound)
-8. **Dinosaur**: {d1Y0nx0sOr} (with "sore" ending)
-9. **Elephant**: {1i0lW0fxnt} (first syllable emphasis)
-10. **Telephone**: {t1E0lW0fon} (altered vowels)
-11. **Internet**: {1i0ntR0nEt} (strange first syllable)
-12. **Cucumber**: {k1u0kAm0bR} (exaggerated first syllable)
-13. **Spaghetti**: {spx0g1E0ti} (emphasis on the E)
-14. **Bicycle**: {b1Y0sx0kWl} (altered vowels)
-15. **Chocolate**: {C1o0kx0lxt} (altered first syllable)
-16. **Hamburger**: {h1@0mbR0gR} (compressed with bird-like endings)
-17. **Octopus**: {1A0ktW0pUs} (altered first vowel)
-18. **Microwave**: {m1Y0krW0wev} (exaggerated first syllable)
-19. **Pineapple**: {p1Y0n@0pl} (with shorter ending)
-20. **Kangaroo**: {k@0Gx0r1u} (emphasis on final syllable)
-21. **Crocodile**: {kr1A0kW0dYl} (with unusual first syllable)
-22. **Butterfly**: {b1O0tR0flY} (with "boy" sound at start)
-23. **Helicopter**: {h1E0lW0kA0ptR} (compressed)
-24. **Umbrella**: {Am0br1E0lx} (emphasis on second syllable)
-25. **Avocado**: {1@0vW0kY0do} (altered first syllable)
-26. **Hippopotamus**: {h2i0pW0p1A0tx0mWs} (emphasis shift)
-27. **Watermelon**: {w1O0tR0mE0lxn} (with "boy" sound at start)
-28. **Refrigerator**: {rW0fr2i0jR1e0tR} (emphasis on third syllable)
-29. **Calculator**: {k1@0lkyW0le0tR} (compressed)
-30. **Caterpillar**: {k1@0tR0p2i0lR} (shortened)
-31. **Television**: {t1E0lW0v2i0ZWn} (altered vowels)
-32. **Alligator**: {2@0lW0g1e0tR} (emphasis shift)
-33. **Restaurant**: {r1E0stW0rAnt} (altered vowels)
-34. **Gymnasium**: {j2i0mn1e0zWm} (compressed)
-35. **Tornado**: {tOr0n1e0do} (emphasis shift)
-36. **Mosquito**: {m1A0sk0wi0to} (altered first syllable)
-37. **Pajamas**: {px0j1a0mxz} (emphasis on middle syllable)
-38. **Penguin**: {p1E0Gw0In} (altered vowels)
-39. **Skeleton**: {sk1i0lW0tAn} (with long E sound)
-40. **Astronaut**: {1@0strW0nOt} (with "boy" ending)
-41. **Saxophone**: {s1@0ksW0fon} (altered vowels)
-42. **Helicopter**: {h1E0lY0kA0ptR} (with "bite" sound)
-43. **Cinnamon**: {s2i0nW0m1A0n} (altered stress and vowels)
-44. **Platypus**: {pl1@0tW0pUs} (altered vowels)
-45. **Rattlesnake**: {r1@0tWl0snek} (compressed)
-46. **Broccoli**: {br1A0kW0li} (with short O sound)
-47. **Cauliflower**: {k1O0lW0flY0R} (with "boy" first syllable)
-48. **Jellyfish**: {j1E0lW0fIS} (compressed)
-49. **Flamingo**: {flW0m1i0Go} (emphasis on second syllable)
-50. **Hippopotamus**: {h2i0pW0b1A0tW0mWs} (altered consonant in middle)
+	Custom pronounciations:
+	A custom pronounciation of any word can be generated.
+	Here is the table for vowels and consonants:
+	Vowels
+	symbol	use in an english word
+	@	bat
+	a	hot
+	A	butt
+	W	about
+	x	comma
+	Y	bite
+	E	bet
+	R	bird, foreword
+	e	bait
+	I	bit
+	i	beat
+	o	boat
+	O	boy
+	U	book
+	u	boot
+	N	button
+
+	Consonants
+	symbol	use in an english word
+	b	buy
+	C	China
+	d	die
+	D	thy
+	f	fight
+	g	guy
+	h	high
+	J	jive
+	k	kite
+	l	lie
+	m	my
+	n	nigh
+	G	sing
+	p	pie
+	r	rye
+	s	sigh
+	S	shy
+	t	tie
+	T	thigh
+	v	vie
+	w	wise
+	y	yacht
+	z	zoo
+	Z	pleasure
+
+	To accentuate a certain vowel within a word, use stress numeric tags:
+
+	For primary stress, put 1 before the relevant vowel. For example, comma would be {k1am0x}
+
+	For seconadary stress, put 2 in front of the relevant vowel. For example, auctioneer would be {2akS0In1ir}
+
+	All other vowels shoud have a 0 in front of them.
 	</TTS_SETTINGS>
 	<EXAMPLES>
-    User message: Mars landing is expected in 2035
-	Joke suggestion: It looks like i will be waiting for a long time for the Tesla stock to climb up again
-	TTS input:  It looks like i will be waiting for a {loooooooong} time for the Tesla stock to climb up again
+	One trick is to prolong a vowel by using the stress tags.
+
+	User message: Mars landing is expected in 2035
+	Joke suggestion: I'll be waiting so freaking long for the Tesla stock to climb up again
+	TTS input:     I'll be waiting {s0o2o1o0o0o0o0o} freaking long for the Tesla stock to climb up again
+
+	Another trick is to intentially change the pronounciation of a word
+	User message: I had some wine with friends last night
+	Joke suggestion: Were the friends you had 3 bottles of wine with imaginary? 
+	TTS input: Were the friends you had 3 bottles of {v1In2o} with imaginary? 
+
+	One more trick is to imitate a stutter to mimick the user's word
+	User message: I decided to take on pilates
+	Joke suggestion: Oh you think pilates is going to help with your body shape? I doubt it
+	TTS input: Oh you think {p2Il1A1@1at0is} is going to help with your body shape? I doubt it
+
 	</EXAMPLES>
+
+	RETURN THE TTS INPUT ONLY NOTHING ELSE!
 			""",
             role="system",
         )
@@ -225,6 +330,7 @@ async def entrypoint(ctx: JobContext):
         tts=rime_tts,
         # intial ChatContext with system prompt
         chat_ctx=initial_chat_ctx,
+        before_llm_cb=before_llm_cb,
         # whether the agent can be interrupted
         allow_interruptions=True,
         # sensitivity of when to interrupt
@@ -232,7 +338,6 @@ async def entrypoint(ctx: JobContext):
         interrupt_min_words=0,
         # minimal silence duration to consider end of turn
         min_endpointing_delay=0.5,
-        before_llm_cb=before_llm_cb,
     )
 
     logger.info(f"Agent connected to room: {ctx.room.name}")
