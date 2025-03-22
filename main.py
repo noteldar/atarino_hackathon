@@ -4,6 +4,7 @@ import os
 
 load_dotenv()
 import logging
+from livekit.agents.utils.images import encode, EncodeOptions, ResizeOptions
 
 from livekit import api
 from livekit import rtc
@@ -71,7 +72,7 @@ async def entrypoint(ctx: JobContext):
             video_track = await get_video_track(room)
             video_stream = rtc.VideoStream(video_track)
             async for event in video_stream:
-                logger.debug("Captured latest video frame")
+                logger.info(f"Captured latest video frame: {type(event.frame.data)}")
                 return event.frame
         except Exception as e:
             logger.error(f"Failed to get latest image: {e}")
@@ -107,11 +108,23 @@ async def entrypoint(ctx: JobContext):
 		```
 		"""
         logger.info(f"association_prompt: {association_prompt}")
-
+        image_bytes = encode(
+            latest_image,
+            EncodeOptions(
+                format="JPEG",
+                resize_options=ResizeOptions(
+                    width=512, height=512, strategy="scale_aspect_fit"
+                ),
+            ),
+        )
         association_response = gemini_client.models.generate_content(
             model="gemini-2.0-flash",
             contents=[
                 association_prompt,
+                types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type="image/jpeg",
+                ),
             ],
         )
 
@@ -123,7 +136,7 @@ async def entrypoint(ctx: JobContext):
 		You are a humor judge. Below is a list of joke suggestions.
 		Select the single funniest joke from the list and explain briefly why it's the funniest.
 		Use the following framework to judge:
-        The best jokes are following one of these styles:
+		The best jokes are following one of these styles:
 		- Sarcasm
 		- Absurd
 		- Dry
@@ -132,7 +145,7 @@ async def entrypoint(ctx: JobContext):
 		- Dark
 		- Wordplay
 
-        Use the examples of good jokes below to help you judge the jokes.
+		Use the examples of good jokes below to help you judge the jokes.
 		EXAMPLES:
 		EXAMPLE1:
 		INPUT:
@@ -228,7 +241,7 @@ async def entrypoint(ctx: JobContext):
             content="""
 	You are a conversational assistant.
 	You are given the latest user message along with a suggestion for a joke.
-    You also have the image from the user's camera.
+	You also have the image from the user's camera.
 	Your task is to use this joke suggestion and the image when appropriate and convert it into a joke text for a text-to-speech model.
 
 	<TTS_SETTINGS>
