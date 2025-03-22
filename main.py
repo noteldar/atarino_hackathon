@@ -16,12 +16,17 @@ from livekit.agents import (
 )
 
 from livekit.agents.pipeline import VoicePipelineAgent
-from livekit.plugins import deepgram, openai, silero
+from livekit.plugins import deepgram, openai, silero, google
 from livekit.plugins.rime import TTS
 
 
 logger = logging.getLogger("myagent")
 logger.setLevel(logging.INFO)
+
+google_llm = google.LLM(
+    model="gemini-2.0-flash-exp",
+    temperature="0.8",
+)
 
 rime_tts = TTS(
     model="mist",
@@ -51,7 +56,7 @@ TALK ABOUT KITTENS OBSESSIVELY
         vad=silero.VAD.load(),
         # flexibility to use any models
         stt=deepgram.STT(model="nova-2-general"),
-        llm=openai.LLM(),
+        llm=google_llm,
         tts=rime_tts,
         # intial ChatContext with system prompt
         chat_ctx=initial_chat_ctx,
