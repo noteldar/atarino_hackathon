@@ -11,6 +11,9 @@ High-quality speech synthesis via Rime TTS
 
 LLM-based reasoning and response generation using Google DeepMind
 
-Modular, extensible design for experimenting with various AI tools
 
-Development and debugging support with OpenHands code assistant
+
+To use, run
+python main.py dev
+
+Then connect to the livekit room using https://agents-playground.livekit.io/
