@@ -7,3 +7,4 @@ python-dotenv
 livekit-plugins-rime
 livekit-plugins-silero
 livekit-plugins-deepgram
+exa-py

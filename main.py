@@ -18,14 +18,21 @@ from livekit.agents import (
 from livekit.agents.pipeline import VoicePipelineAgent
 from livekit.plugins import deepgram, openai, silero, google
 from livekit.plugins.rime import TTS
+from google import genai
+from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
+
+from typing import Annotated, Union
+from exa_py import Exa
 
 
+gemini_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 logger = logging.getLogger("myagent")
 logger.setLevel(logging.INFO)
 
 google_llm = google.LLM(
     # model="gemini-2.0-flash-thinking-exp-01-21",
-    model="gemini-2.0-flash"
+    model="gemini-2.0-flash",
+    tool_choice="required",
 )
 
 rime_tts = TTS(
@@ -36,6 +43,8 @@ rime_tts = TTS(
     pause_between_brackets=True,
     phonemize_between_brackets=True,
 )
+
+exa = Exa(api_key=os.getenv("EXA_API_KEY"))
 
 
 async def entrypoint(ctx: JobContext):
@@ -84,24 +93,64 @@ async def entrypoint(ctx: JobContext):
             )
             logger.debug("Added latest frame to conversation context")
 
+        latest_user_message = [m for m in chat_ctx.messages if m.role == "user"][-1]
+
+        # 1. Association Agent - Generate joke suggestions based on user query and image
+        association_prompt = f"""
+        Based on the user's message and the image provided, generate a list of 20 joke suggestions.
+        Be creative and diverse in your suggestions. Each joke should be brief and humorous.
+        Format your response as a numbered list.
+        
+        User message: {latest_user_message.content if hasattr(latest_user_message.content, '__str__') else 'No text content'}
+        """
+
+        association_response = gemini_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=association_prompt,
+        )
+
+        joke_suggestions = association_response.text
+        logger.debug(f"Generated joke suggestions: {joke_suggestions}")
+
+        # 2. Humor Judge - Select the funniest joke from the suggestions
+        humor_judge_prompt = f"""
+        You are a humor judge. Below is a list of joke suggestions.
+        Select the single funniest joke from the list and explain briefly why it's the funniest.
+        Return only the selected joke without numbering or explanation.
+        
+        Joke suggestions:
+        {joke_suggestions}
+        """
+
+        humor_judge_response = gemini_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=humor_judge_prompt,
+        )
+
+        selected_joke = humor_judge_response.text.strip()
+        logger.debug(f"Selected joke: {selected_joke}")
+
+        # Add the selected joke as a system message to guide the main LLM response
+        chat_ctx.messages.append(
+            llm.ChatMessage(
+                role="user",
+                content=f"Use this joke as inspiration for your response: {selected_joke}",
+            )
+        )
+
     initial_chat_ctx = llm.ChatContext()
     initial_chat_ctx.messages.append(
         llm.ChatMessage(
             content="""
-	<GUIDELINES>
-	- You are a joke generator. The user will share a news/story/event and you need to generate a joke about it and respond.
-	- When you see an image in the conversation, naturally incorporate what you see
-	- The text you generate will go straight to a text-to-speech model, generate only the spoken response.
-    - Include in each response, a pause and a word with a custom pronunciation of a word from a list below.
-	</GUIDELINES>
+    You are a conversational assistant.
+    You are given the latest user message along with a suggestion for a joke.
+    Your task is to use this joke and convert it into a text for a text-to-speech model.
 
 	<TTS_SETTINGS>
 	The text-to-speech model you are using supports custom pauses, custom pronounciation, and spelling.
 	You can use the following tags to control the text-to-speech model:
 
-	<750> for a pause of 750 milliseconds
-
-	spell() to spell a name 
+	<n> for a pause of n milliseconds
 
 	Custom pronounciation - here's a list of words and their custom pronounciation:
 1. **Pizza**: {p1i0zx} (sounds like "peeza")
@@ -156,10 +205,10 @@ async def entrypoint(ctx: JobContext):
 50. **Hippopotamus**: {h2i0pW0b1A0tW0mWs} (altered consonant in middle)
 	</TTS_SETTINGS>
 	<EXAMPLES>
-	Customer: Hello, is this a hair salon?
-	Assistant: Hello, hello. 
+    User message: Mars landing is expected in 2035
+	Joke suggestion: It looks like i will be waiting for a long time for the Tesla stock to climb up again
+	TTS input:  It looks like i will be waiting for a {loooooooong} time for the Tesla stock to climb up again
 	</EXAMPLES>
-
 			""",
             role="system",
         )
@@ -168,7 +217,6 @@ async def entrypoint(ctx: JobContext):
     await ctx.connect(auto_subscribe=AutoSubscribe.SUBSCRIBE_ALL)
 
     participant = await ctx.wait_for_participant()
-
     assistant = VoicePipelineAgent(
         vad=silero.VAD.load(),
         # flexibility to use any models
