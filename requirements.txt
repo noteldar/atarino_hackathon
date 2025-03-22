@@ -4,3 +4,6 @@ livekit-plugins-google
 livekit-plugins-openai
 livekit-plugins-anthropic
 python-dotenv
+livekit-plugins-rime
+livekit-plugins-silero
+livekit-plugins-deepgram

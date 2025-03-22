@@ -5,6 +5,7 @@ import os
 load_dotenv()
 import logging
 
+from livekit import api
 from livekit import rtc
 from livekit.agents import (
     AutoSubscribe,
@@ -13,40 +14,60 @@ from livekit.agents import (
     cli,
     llm,
 )
-from livekit.agents.multimodal import MultimodalAgent
-from livekit.plugins import openai
+
+from livekit.agents.pipeline import VoicePipelineAgent
+from livekit.plugins import deepgram, openai, silero
+from livekit.plugins.rime import TTS
 
 
 logger = logging.getLogger("myagent")
 logger.setLevel(logging.INFO)
 
+rime_tts = TTS(
+    model="mist",
+    speaker="rainforest",
+    speed_alpha=0.9,
+    reduce_latency=True,
+)
+
 
 async def entrypoint(ctx: JobContext):
     logger.info("starting entrypoint")
+    initial_chat_ctx = llm.ChatContext()
+    initial_chat_ctx.messages.append(
+        llm.ChatMessage(
+            content="""
+TALK ABOUT KITTENS OBSESSIVELY
+            """,
+            role="system",
+        )
+    )
 
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
     participant = await ctx.wait_for_participant()
 
-    model = openai.realtime.RealtimeModel(
-        instructions="You are a helpful assistant and you love kittens",
-        voice="shimmer",
-        temperature=0.8,
-        modalities=["audio", "text"],
+    assistant = VoicePipelineAgent(
+        vad=silero.VAD.load(),
+        # flexibility to use any models
+        stt=deepgram.STT(model="nova-2-general"),
+        llm=openai.LLM(),
+        tts=rime_tts,
+        # intial ChatContext with system prompt
+        chat_ctx=initial_chat_ctx,
+        # whether the agent can be interrupted
+        allow_interruptions=True,
+        # sensitivity of when to interrupt
+        interrupt_speech_duration=0.5,
+        interrupt_min_words=0,
+        # minimal silence duration to consider end of turn
+        min_endpointing_delay=0.5,
     )
-    assistant = MultimodalAgent(model=model)
+
+    logger.info(f"Agent connected to room: {ctx.room.name}")
+    logger.info(f"Local participant identity: {ctx.room.local_participant.identity}")
     assistant.start(ctx.room)
-
     logger.info("starting agent")
-
-    session = model.sessions[0]
-    session.conversation.item.create(
-        llm.ChatMessage(
-            role="assistant",
-            content="Please begin the interaction with the user in a manner consistent with your instructions.",
-        )
-    )
-    session.response.create()
 
 
 if __name__ == "__main__":
